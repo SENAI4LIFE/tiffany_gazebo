@@ -17,7 +17,7 @@ https://onshape-to-robot.readthedocs.io/
 
 If you want to use your own hexapod model, you should add a keys and a config.json file in a folder
 To get the API keys, follow the onshape-to-robot documentation
-the key textis formatted as follow:
+the key textis formatted as follow: <br>
 `
 export ONSHAPE_API=https://cad.onshape.com
 export ONSHAPE_ACCESS_KEY=
