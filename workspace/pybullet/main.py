@@ -157,6 +157,42 @@ def compute_rebolar(k, xyz_ini):
     roll_deg, pitch_deg, yaw_deg = circular_roll_pitch_yaw(k, 10)
     return compute_ik_corpo(roll_deg, pitch_deg, yaw_deg, xyz_ini)
 
+PATINHA_TOTAL  = 50
+PATINHA_META   = PATINHA_TOTAL // 2
+PATINHA_ROLL   = -10.0
+PATINHA_PITCH  = -10.0
+PATINHA_DX     = -10.0
+PATINHA_DY     =   0.0
+PATINHA_DZ     =  10.0
+
+def _rotacao_pata(ponto, roll_deg, pitch_deg, yaw_deg):
+    r = roll_deg  * _RAD
+    pi = pitch_deg * _RAD
+    w = yaw_deg   * _RAD
+    x = ponto[0]*math.cos(pi)*math.cos(w)   + ponto[1]*(math.cos(w)*math.sin(pi)*math.sin(r) - math.cos(r)*math.sin(w)) + ponto[2]*(math.sin(r)*math.sin(w) + math.cos(r)*math.cos(w)*math.sin(pi))
+    y = ponto[0]*math.cos(pi)*math.sin(w)   + ponto[1]*(math.cos(r)*math.cos(w) + math.sin(pi)*math.sin(r)*math.sin(w)) + ponto[2]*(math.cos(r)*math.sin(pi)*math.sin(w) - math.cos(w)*math.sin(r))
+    z = -ponto[0]*math.sin(pi) + ponto[1]*math.cos(pi)*math.sin(r) + ponto[2]*math.cos(pi)*math.cos(r)
+    return np.array([x, y, z])
+
+def compute_dar_patinha(k, xyz_ini):
+    roll  = -PATINHA_ROLL
+    pitch = -PATINHA_PITCH
+    sig_right = np.array([-1., -1.,  1.])
+    sig_left  = np.array([-1.,  1.,  1.])
+    sig_list  = [sig_left, sig_left, sig_left, sig_right, sig_right, sig_right]
+    results   = []
+    for i, cfg in enumerate(LEG_CONFIGS):
+        if i == 3:
+            xyz = bezier_pata(xyz_ini[i], k, PATINHA_DX, PATINHA_DY, PATINHA_DZ, PATINHA_TOTAL)
+        else:
+            sig   = sig_list[i]
+            ombro = SHOULDER_POSITIONS[i]
+            ponto = xyz_ini[i] * sig + ombro
+            rot   = _rotacao_pata(ponto, roll, pitch, 0.0)
+            xyz   = (rot - ombro) * sig
+        results.append(ik(xyz))
+    return results
+
 def setup_simulation():
     p.connect(p.GUI)
     p.setAdditionalSearchPath(pybullet_data.getDataPath())
@@ -328,6 +364,7 @@ def main():
     pose_pitch     = 0.0
     POSE_MAX       = 15.0
     POSE_STEP      = 1.5
+    patinha_k      = 0
 
     KEY_E = ord('e')
     KEY_R = ord('r')
@@ -337,6 +374,8 @@ def main():
     KEY_B = ord('b')
     KEY_Z = ord('z')
     KEY_N = ord('n')
+    KEY_G = ord('g')
+    KEY_P = ord('p')
 
     UP    = p.B3G_UP_ARROW
     DOWN  = p.B3G_DOWN_ARROW
@@ -374,7 +413,7 @@ def main():
             k     = 0
             state = "IDLE"
 
-        elif last_key == KEY_R and state in ("IDLE", "WALKING", "TURNING", "BALANCE", "REBOLAR", "POSE"):
+        elif last_key == KEY_R and state in ("IDLE", "WALKING", "TURNING", "BALANCE", "REBOLAR", "POSE", "PATINHA"):
             run_shutdown_sequence(robot, xyz_ini)
             state = "POWERED_OFF"
 
@@ -387,11 +426,14 @@ def main():
 
         z_held = KEY_Z in keys and keys[KEY_Z] & p.KEY_IS_DOWN
 
-        if state in ("IDLE", "WALKING", "TURNING", "BALANCE", "REBOLAR", "POSE"):
+        if state in ("IDLE", "WALKING", "TURNING", "BALANCE", "REBOLAR", "POSE", "PATINHA"):
             if last_key == KEY_B:
                 state = "REBOLAR"
             elif last_key == KEY_N:
                 state = "BALANCE"
+            elif (last_key == KEY_G or last_key == KEY_P) and state != "PATINHA":
+                patinha_k = 0
+                state = "PATINHA"
             elif z_held:
                 state = "POSE"
                 if up_dn[0]:
@@ -416,7 +458,7 @@ def main():
                     elif lr[1]:    angle_joystick = 90.0
                     state = "TURNING"
             else:
-                if state not in ("IDLE", "POWERED_OFF", "REBOLAR", "POSE"):
+                if state not in ("IDLE", "POWERED_OFF", "REBOLAR", "POSE", "PATINHA"):
                     state = "IDLE"
                 if state == "POSE" and not z_held:
                     pose_roll  = 0.0
@@ -449,6 +491,15 @@ def main():
             results = compute_ik_corpo(pose_roll, pose_pitch, 0.0, xyz_ini)
             for i, (o, f, t) in enumerate(results):
                 set_leg(robot, LEG_CONFIGS[i], o, f, t)
+
+        elif state == "PATINHA":
+            results = compute_dar_patinha(patinha_k, xyz_ini)
+            for i, (o, f, t) in enumerate(results):
+                set_leg(robot, LEG_CONFIGS[i], o, f, t)
+            if patinha_k < PATINHA_META - 1:
+                patinha_k += 1
+            else:
+                state = "IDLE"
 
         elif state == "REBOLAR":
             results = compute_rebolar(k, xyz_ini)
