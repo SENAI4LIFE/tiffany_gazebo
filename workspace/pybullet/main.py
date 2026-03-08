@@ -5,42 +5,142 @@ import math
 import numpy as np
 import bootcamp
 
-SIM_FREQ = 120
-DT = 1.0 / SIM_FREQ
+SIM_FREQ      = 120
+DT            = 1.0 / SIM_FREQ
+TOTAL_PONTOS  = 25
+METADE_PONTOS = TOTAL_PONTOS // 2
 
-STOWED_FEMUR = -80.0
-STOWED_TIBIA  = 140.0
-PEAK_FEMUR    = -60.0
-PEAK_TIBIA    = 120.0
-STEP_HEIGHT   = 0.12
-STEP_STRIDE   = 20.0
+L1 = 2.56
+L2 = 9.00
+L3 = 11.96
 
-COXA_LIMIT  = 40.0
-FEMUR_MIN   = -85.0
-FEMUR_MAX   =  30.0
-TIBIA_MIN   =  30.0
-TIBIA_MAX   = 150.0
+_PI  = math.pi
+_RAD = _PI / 180.0
+_DEG = 180.0 / _PI
 
 LEG_CONFIGS = [
-    (0,  1,  2,  -30, -26, 100, "right"),
-    (3,  4,  5,    0, -26, 100, "right"),
-    (6,  7,  8,   30, -26, 100, "right"),
-    (9,  10, 11,  30, -26, 100, "left"),
-    (12, 13, 14,   0, -26, 100, "left"),
-    (15, 16, 17, -30, -26, 100, "left"),
+    (0,  1,  2,  -30, 25, -95, "right"),
+    (3,  4,  5,    0, 25, -95, "right"),
+    (6,  7,  8,   30, 25, -95, "right"),
+    (9,  10, 11,  30, 25, -95, "left"),
+    (12, 13, 14,   0, 25, -95, "left"),
+    (15, 16, 17, -30, 25, -95, "left"),
 ]
 
-GAIT_PHASES = [0, math.pi, 0, math.pi, 0, math.pi]
+SHOULDER_POSITIONS = [
+    np.array([ 9.30, -5.55, 0.0]),
+    np.array([ 0.00, -6.50, 0.0]),
+    np.array([-9.50, -5.50, 0.0]),
+    np.array([ 9.30,  5.55, 0.0]),
+    np.array([ 0.00,  6.50, 0.0]),
+    np.array([-9.50,  5.50, 0.0]),
+]
 
-_TWO_PI = 2.0 * math.pi
-_PI     = math.pi
-_RAD    = math.pi / 180.0
-_DEG    = 180.0 / math.pi
+OFFSETS = [0, METADE_PONTOS, 0, METADE_PONTOS, 0, METADE_PONTOS]
 
-BALANCE_ROLL_GAIN  = 12.0
-BALANCE_PITCH_GAIN = 12.0
-BALANCE_DAMP       = 0.20
+STEP_LENGTH = -8.0
 
+ANGLES_STOW_BY_LEG = [
+    (-30, 90, -135),
+    (  0, 90, -135),
+    ( 30, 90, -135),
+    ( 30, 90, -135),
+    (  0, 90, -135),
+    (-30, 90, -135),
+]
+
+def fk(ombro_deg, femur_deg, tibia_deg):
+    o = ombro_deg * _RAD
+    f = femur_deg * _RAD
+    t = tibia_deg * _RAD
+    x = -math.sin(o) * (L1 + L3 * math.cos(f + t) + L2 * math.cos(f))
+    y =  math.cos(o) * (L1 + L3 * math.cos(f + t) + L2 * math.cos(f))
+    z =  L3 * math.sin(f + t) + L2 * math.sin(f)
+    return np.array([x, y, z])
+
+def ik(xyz):
+    x, y, z  = float(xyz[0]), float(xyz[1]), float(xyz[2])
+    y_prime  = math.sqrt(x*x + y*y) - L1
+    Lv       = math.sqrt(z*z + y_prime*y_prime)
+    cos_alpha = np.clip((L2*L2 + L3*L3 - Lv*Lv) / (2*L2*L3), -1.0, 1.0)
+    cos_beta  = np.clip((Lv*Lv + L2*L2 - L3*L3) / (2*Lv*L2), -1.0, 1.0)
+    tibia_rad  = -_PI + math.acos(cos_alpha)
+    ombro_rad  = -math.atan2(x, y)
+    femur_rad  =  math.acos(cos_beta) + math.atan2(z, y_prime)
+    return (ombro_rad * _DEG, femur_rad * _DEG, tibia_rad * _DEG)
+
+def rotation_matrix(roll_deg, pitch_deg, yaw_deg):
+    r = roll_deg  * _RAD
+    p = pitch_deg * _RAD
+    w = yaw_deg   * _RAD
+    Rz = np.array([[math.cos(w), -math.sin(w), 0],
+                   [math.sin(w),  math.cos(w), 0],
+                   [0,            0,            1]])
+    Ry = np.array([[ math.cos(p), 0, math.sin(p)],
+                   [0,            1, 0           ],
+                   [-math.sin(p), 0, math.cos(p)]])
+    Rx = np.array([[1, 0,           0           ],
+                   [0, math.cos(r), -math.sin(r)],
+                   [0, math.sin(r),  math.cos(r)]])
+    return Rz @ Ry @ Rx
+
+def build_bezier_points(xyz_ini):
+    half = STEP_LENGTH / 2.0
+    P0 = [xyz_ini[0] - half,       xyz_ini[2]]
+    P1 = [P0[0] + half / 2.0,      P0[1] + 2.0 * abs(half)]
+    P3 = [P0[0] + STEP_LENGTH,     P0[1]]
+    P2 = [P3[0] - half / 2.0,      P0[1] + 2.0 * abs(half)]
+    return P0, P1, P2, P3
+
+def trajetoria_linear(xyz_ini, k, offset, angle_rad, P0, P1, P2, P3):
+    kn = (k + offset) % TOTAL_PONTOS
+    if kn < METADE_PONTOS:
+        t  = float(kn) / (METADE_PONTOS - 1)
+        u  = 1.0 - t
+        bx = u**3*P0[0] + 3*u**2*t*P1[0] + 3*u*t**2*P2[0] + t**3*P3[0]
+        bz = u**3*P0[1] + 3*u**2*t*P1[1] + 3*u*t**2*P2[1] + t**3*P3[1]
+        dx = bx - xyz_ini[0]
+        x  = xyz_ini[0] + math.cos(angle_rad) * dx
+        y  = xyz_ini[1] + math.sin(angle_rad) * dx
+        z  = bz
+    else:
+        t  = float(kn - METADE_PONTOS) / (METADE_PONTOS - 1)
+        bx = P3[0] + (P0[0] - P3[0]) * t
+        dx = bx - xyz_ini[0]
+        x  = xyz_ini[0] + math.cos(angle_rad) * dx
+        y  = xyz_ini[1] + math.sin(angle_rad) * dx
+        z  = xyz_ini[2]
+    return np.array([x, y, z])
+
+def mapeia_circular(xyz_ini, xyz_atual, step_len, total_angle, shoulder):
+    d_alpha = (total_angle / 2.0) * (xyz_atual[0] - xyz_ini[0]) / step_len
+    x = xyz_ini[0] + shoulder[0]
+    y = xyz_ini[1] + shoulder[1]
+    R = math.sqrt(x*x + y*y)
+    alpha   = math.atan2(x, y)
+    n_alpha = alpha + d_alpha
+    return np.array([R*math.sin(n_alpha) - shoulder[0],
+                     R*math.cos(n_alpha) - shoulder[1],
+                     xyz_atual[2]])
+
+def bezier_pata(xyz_ini, k, dx, dy, dz, total):
+    meta = total // 2
+    kn   = k % total
+    dx1, dx2 = dx / 4.0, dx / 2.0
+    dy1, dy2 = dy / 4.0, dy / 2.0
+    dz1, dz2 = dz / 4.0, dz / 2.0
+    Px = [xyz_ini[0], xyz_ini[0]+dx1, xyz_ini[0]+dx2, xyz_ini[0]+dx]
+    Py = [xyz_ini[1], xyz_ini[1]+dy1, xyz_ini[1]+dy2, xyz_ini[1]+dy]
+    Pz = [xyz_ini[2], xyz_ini[2]+dz1+6.0, xyz_ini[2]+dz2+10.0, xyz_ini[2]+dz]
+    if kn < meta:
+        t = float(kn) / (meta - 1)
+        u = 1.0 - t
+        x = u**3*Px[0] + 3*u**2*t*Px[1] + 3*u*t**2*Px[2] + t**3*Px[3]
+        y = u**3*Py[0] + 3*u**2*t*Py[1] + 3*u*t**2*Py[2] + t**3*Py[3]
+        z = u**3*Pz[0] + 3*u**2*t*Pz[1] + 3*u*t**2*Pz[2] + t**3*Pz[3]
+    else:
+        x, y, z = Px[3], Py[3], Pz[3]
+    return np.array([x, y, z])
 
 def setup_simulation():
     p.connect(p.GUI)
@@ -50,7 +150,7 @@ def setup_simulation():
     p.configureDebugVisualizer(p.COV_ENABLE_SHADOWS, 0)
     p.configureDebugVisualizer(p.COV_ENABLE_RGB_BUFFER_PREVIEW, 0)
     p.configureDebugVisualizer(p.COV_ENABLE_TINY_RENDERER, 0)
-    p.resetDebugVisualizerCamera(5.0, 270, -25, [-5.0, 0, 5.0])
+    p.resetDebugVisualizerCamera(1.0, 270, -25, [-1.0, 0, 1.0])
     p.setGravity(0, 0, -9.81)
     p.setPhysicsEngineParameter(
         numSolverIterations=8,
@@ -69,348 +169,249 @@ def setup_simulation():
                          maxJointVelocity=6.0)
     return robot
 
-
-def calibrate_segments(robot):
-    tibia_info = p.getJointInfo(robot, 2)
-    L1 = float(np.linalg.norm(tibia_info[14]))
-    L2 = 0.15
-    for j in range(p.getNumJoints(robot)):
-        info = p.getJointInfo(robot, j)
-        if info[16] == 2:
-            L2 = float(np.linalg.norm(info[14]))
-            break
-    return L1, L2
-
-
-def fk_2d(femur_deg, tibia_deg, L1, L2):
-    f  = femur_deg * _RAD
-    ft = f + tibia_deg * _RAD
-    return (L1 * math.cos(f)  + L2 * math.cos(ft),
-            L1 * math.sin(f)  + L2 * math.sin(ft))
-
-
-def ik_2d(ext, dep, L1, L2):
-    r_sq  = ext * ext + dep * dep
-    max_r = L1 + L2
-    if r_sq > max_r * max_r:
-        s   = max_r / math.sqrt(r_sq)
-        ext *= s;  dep *= s
-        r_sq = max_r * max_r
-    cos_t = (r_sq - L1 * L1 - L2 * L2) / (2.0 * L1 * L2)
-    cos_t = 1.0 if cos_t > 1.0 else (-1.0 if cos_t < -1.0 else cos_t)
-    t     = math.acos(cos_t)
-    sin_t = math.sin(t)
-    f     = math.atan2(dep, ext) - math.atan2(L2 * sin_t, L1 + L2 * cos_t)
-    femur_deg = f * _DEG
-    tibia_deg = t * _DEG
-    femur_deg = max(FEMUR_MIN, min(FEMUR_MAX, femur_deg))
-    tibia_deg = max(TIBIA_MIN, min(TIBIA_MAX, tibia_deg))
-    return femur_deg, tibia_deg
-
-
-def clamp_coxa(coxa_home, deviation):
-    clamped = max(-COXA_LIMIT, min(COXA_LIMIT, deviation))
-    return coxa_home + clamped, clamped
-
-
-def bezier3(p0, p1, p2, p3, t):
-    u = 1.0 - t
-    return u*u*u*p0 + 3.0*u*u*t*p1 + 3.0*u*t*t*p2 + t*t*t*p3
-
-
-def set_leg(robot, coxa_id, femur_id, tibia_id, coxa_deg, femur_deg, tibia_deg):
+def set_leg(robot, cfg, ombro_deg, femur_deg, tibia_deg):
+    jO, jF, jT = cfg[0], cfg[1], cfg[2]
     mv = 4.0
-    p.setJointMotorControl2(robot, coxa_id,  p.POSITION_CONTROL, coxa_deg  * _RAD, maxVelocity=mv)
-    p.setJointMotorControl2(robot, femur_id, p.POSITION_CONTROL, femur_deg * _RAD, maxVelocity=mv)
-    p.setJointMotorControl2(robot, tibia_id, p.POSITION_CONTROL, tibia_deg * _RAD, maxVelocity=mv)
+    p.setJointMotorControl2(robot, jO, p.POSITION_CONTROL,  ombro_deg * _RAD, maxVelocity=mv)
+    p.setJointMotorControl2(robot, jF, p.POSITION_CONTROL, -femur_deg * _RAD, maxVelocity=mv)
+    p.setJointMotorControl2(robot, jT, p.POSITION_CONTROL, -tibia_deg * _RAD, maxVelocity=mv)
 
+def init_leg_state():
+    xyz_ini = []
+    bezier  = []
+    for cfg in LEG_CONFIGS:
+        _, _, _, coxa_home, femur_home, tibia_home, _ = cfg
+        xyz = fk(coxa_home, femur_home, tibia_home)
+        xyz_ini.append(xyz)
+        bezier.append(build_bezier_points(xyz))
+    return xyz_ini, bezier
 
 def get_body_tilt(robot, smoothed_rpy):
     _, orn = p.getBasePositionAndOrientation(robot)
     rpy    = p.getEulerFromQuaternion(orn)
     for i in range(3):
-        smoothed_rpy[i] += (rpy[i] - smoothed_rpy[i]) * BALANCE_DAMP
-    return smoothed_rpy[0], smoothed_rpy[1]
+        smoothed_rpy[i] += (rpy[i] - smoothed_rpy[i]) * 0.2
+    return smoothed_rpy[0] * _DEG, smoothed_rpy[1] * _DEG
 
+def compute_andar(k, angle_rad, xyz_ini, bezier):
+    results = []
+    for i, cfg in enumerate(LEG_CONFIGS):
+        P0, P1, P2, P3 = bezier[i]
+        current_angle = angle_rad + (_PI if i >= 3 else 0.0)
+        xyz = trajetoria_linear(xyz_ini[i], k, OFFSETS[i], current_angle, P0, P1, P2, P3)
+        results.append(ik(xyz))
+    return results
 
-def compute_balance_dep_offset(leg_id, roll, pitch):
-    x_sign = ( 1, 0, -1,  1, 0, -1)[leg_id]
-    y_sign = (-1,-1, -1,  1, 1,  1)[leg_id]
-    return pitch * BALANCE_PITCH_GAIN * x_sign + roll * BALANCE_ROLL_GAIN * y_sign
+def compute_andar_circular(k, angle_deg, xyz_ini, bezier):
+    angle_abs = abs(angle_deg)
+    angle_max = _PI / 9.0
+    if angle_deg < 0:
+        angle_max = -angle_max
+    v_mult = 1.0
+    w_mult = 1.0
+    if angle_abs in (0, 180):
+        w_mult = 0.0
+    elif angle_abs == 90:
+        v_mult = 0.0
 
+    dir_signs = [1, 1, 1, -1, -1, -1]
+    results   = []
+    for i, cfg in enumerate(LEG_CONFIGS):
+        P0, P1, P2, P3 = bezier[i]
+        step_len = P3[0] - xyz_ini[i][0]
+        xyz_lin  = trajetoria_linear(xyz_ini[i], k, OFFSETS[i], 0, P0, P1, P2, P3)
+        sign     = dir_signs[i]
+        shoulder = SHOULDER_POSITIONS[i] * np.array([-1.0, sign, 1.0])
+        xyz_rot  = mapeia_circular(xyz_ini[i], xyz_lin, step_len, angle_max * sign, shoulder)
+        xyz_b    = (xyz_lin * v_mult + xyz_rot * w_mult) / (v_mult + w_mult)
+        results.append(ik(xyz_b))
+    return results
 
-def compute_powered_on_angles(leg_id, cfg, gait_phase, fwd, lat, nav_mode,
-                               rest_coeff, coxa_mem, radial_mem, height_mem,
-                               L1, L2, roll, pitch):
-    _, _, _, coxa_home, femur_home, tibia_home, side = cfg
-    ext_n, dep_n = fk_2d(femur_home, tibia_home, L1, L2)
-    phase  = gait_phase % _TWO_PI
-    moving = abs(fwd) > 0.01 or abs(lat) > 0.01
+def compute_ik_corpo(roll_deg, pitch_deg, yaw_deg, xyz_ini):
+    results  = []
+    R        = rotation_matrix(-roll_deg, -pitch_deg, -yaw_deg)
+    sig_list = [
+        np.array([-1.,-1., 1.]),
+        np.array([-1.,-1., 1.]),
+        np.array([-1.,-1., 1.]),
+        np.array([-1., 1., 1.]),
+        np.array([-1., 1., 1.]),
+        np.array([-1., 1., 1.]),
+    ]
+    for i in range(6):
+        sig   = sig_list[i]
+        ombro = SHOULDER_POSITIONS[i]
+        ponto = xyz_ini[i] * sig + ombro
+        rot   = R @ ponto
+        xyz   = (rot - ombro) * sig
+        results.append(ik(xyz))
+    return results
 
-    balance_off = compute_balance_dep_offset(leg_id, roll, pitch)
+def run_boot_sequence(robot, xyz_ini):
+    total = 100
+    meta  = total // 2
+    stow  = [fk(*ANGLES_STOW_BY_LEG[i]) for i in range(6)]
 
-    if moving:
-        spd = math.sqrt(fwd * fwd + lat * lat)
-        mag = spd * 2.0
-        if mag > 1.0: mag = 1.0
-        lift = STEP_HEIGHT * mag
+    for k in range(meta):
+        for i, cfg in enumerate(LEG_CONFIGS):
+            dx  = xyz_ini[i][0] - stow[i][0]
+            dy  = xyz_ini[i][1] - stow[i][1]
+            xyz = bezier_pata(stow[i], k, dx, dy, 0, total)
+            o, f, t = ik(xyz)
+            set_leg(robot, cfg, o, f, t)
+        p.stepSimulation()
+        time.sleep(DT * 3)
 
-        if phase < _PI:
-            swing_t = phase / _PI
-            dep = bezier3(dep_n, dep_n - lift * 1.3, dep_n - lift * 1.3, dep_n, swing_t) if swing_t > 0.0 else dep_n
-        else:
-            dep = dep_n + balance_off * 0.012
+    above = [np.array([xyz_ini[i][0], xyz_ini[i][1], stow[i][2]]) for i in range(6)]
+    for k in range(meta):
+        for i, cfg in enumerate(LEG_CONFIGS):
+            dz  = xyz_ini[i][2] - above[i][2]
+            xyz = bezier_pata(above[i], k, 0, 0, dz, total)
+            o, f, t = ik(xyz)
+            set_leg(robot, cfg, o, f, t)
+        p.stepSimulation()
+        time.sleep(DT * 3)
 
-        osc = math.cos(phase) * STEP_STRIDE
-        
-        if nav_mode == "OMNI":
-            coxa_cmd  = osc * fwd
-            radial_cmd = (-osc * lat * 0.003) if side == "right" else (osc * lat * 0.003)
-        else:
-            fwd_c  = osc * fwd
-            turn_c = osc * lat if side == "right" else -osc * lat
-            coxa_cmd   = fwd_c + turn_c
-            radial_cmd = osc * fwd * 0.0025
-            if leg_id in (1, 4):
-                radial_cmd = 0.0
-            elif leg_id in (2, 5):
-                radial_cmd = -radial_cmd
+def run_shutdown_sequence(robot, xyz_ini):
+    total = 100
+    meta  = total // 2
+    stow  = [fk(*ANGLES_STOW_BY_LEG[i]) for i in range(6)]
+    above = [np.array([xyz_ini[i][0], xyz_ini[i][1], stow[i][2]]) for i in range(6)]
 
-        coxa_mem[leg_id]   += (coxa_cmd   - coxa_mem[leg_id])   * 0.2
-        radial_mem[leg_id] += (radial_cmd - radial_mem[leg_id]) * 0.2
-        height_mem[leg_id]  = dep
+    for k in range(meta):
+        for i, cfg in enumerate(LEG_CONFIGS):
+            dz  = above[i][2] - xyz_ini[i][2]
+            xyz = bezier_pata(xyz_ini[i], k, 0, 0, dz, total)
+            o, f, t = ik(xyz)
+            set_leg(robot, cfg, o, f, t)
+        p.stepSimulation()
+        time.sleep(DT * 3)
 
-        coxa_out, clamped_dev = clamp_coxa(coxa_home, coxa_mem[leg_id])
-        coxa_mem[leg_id] = clamped_dev
-        if side == "right":
-            coxa_out = coxa_home - clamped_dev
-
-        arc = ext_n / math.cos(clamped_dev * _RAD)
-        femur_out, tibia_out = ik_2d(arc + radial_mem[leg_id], dep, L1, L2)
-
-    else:
-        w  = rest_coeff
-        w1 = 1.0 - w
-        c  = coxa_mem[leg_id]   * w1
-        r  = radial_mem[leg_id] * w1
-        d  = height_mem[leg_id] * w1 + (dep_n + balance_off * 0.012) * w
-        c  = max(-COXA_LIMIT, min(COXA_LIMIT, c))
-
-        arc      = ext_n / math.cos(c * _RAD)
-        coxa_out = coxa_home + (c if side == "left" else -c)
-        femur_out, tibia_out = ik_2d(arc + r, d, L1, L2)
-        if w < 1.0:
-            coxa_mem[leg_id]   = c
-            radial_mem[leg_id] = r
-
-    return coxa_out, femur_out, tibia_out
-
-
-def compute_transition_angles(cfg, state, timer):
-    _, _, _, coxa_home, femur_home, tibia_home, _ = cfg
-    coxa = femur = tibia = 0.0
-    inv  = (4.0 - timer) if state == "POWERING_OFF" else timer
-
-    if state == "WORLD_TO_POWERED_OFF_TRANS":
-        a = timer * 0.5
-        femur, tibia = STOWED_FEMUR * a, STOWED_TIBIA * a
-    elif state == "POWERING_ON_TO_WORLD_TRANS":
-        a = 1.0 - timer * 0.5
-        femur, tibia = STOWED_FEMUR * a, STOWED_TIBIA * a
-    elif inv <= 1.0:
-        femur, tibia = STOWED_FEMUR, STOWED_TIBIA * (1.0 - inv) + tibia_home * inv
-    elif inv <= 2.0:
-        a = inv - 1.0
-        femur = STOWED_FEMUR + (PEAK_FEMUR - STOWED_FEMUR) * a
-        tibia = tibia_home
-    elif inv <= 3.0:
-        a = inv - 2.0
-        coxa, femur, tibia = coxa_home * a, PEAK_FEMUR, tibia_home
-    else:
-        a = inv - 3.0
-        coxa  = coxa_home
-        femur = PEAK_FEMUR + (femur_home - PEAK_FEMUR) * a
-        tibia = tibia_home
-
-    return coxa, femur, tibia
-
+    for k in range(meta):
+        for i, cfg in enumerate(LEG_CONFIGS):
+            dx  = stow[i][0] - xyz_ini[i][0]
+            dy  = stow[i][1] - xyz_ini[i][1]
+            xyz = bezier_pata(above[i], k, dx, dy, 0, total)
+            o, f, t = ik(xyz)
+            set_leg(robot, cfg, o, f, t)
+        p.stepSimulation()
+        time.sleep(DT * 3)
 
 def main():
-    robot       = setup_simulation()
-    L1, L2      = calibrate_segments(robot)
-    _, dep_neutral = fk_2d(-26, 100, L1, L2)
+    robot = setup_simulation()
 
-    state               = "WORLD"
-    trans_timer         = 0.0
-    boot_clock          = 0.0
-    stand_blend         = 0.0
-    gait_acc            = 0.0
-    last_key            = None
-    revert_after_shutdown = False
-    nav_mode            = "TURN"
-    cam_track           = False
-    vel_fwd             = 0.0
-    vel_lat             = 0.0
-    rest_coeff          = 1.0
-    smoothed_rpy        = [0.0, 0.0, 0.0]
+    xyz_ini, bezier = init_leg_state()
 
-    leg_phases  = list(GAIT_PHASES)
-    coxa_mem    = [0.0] * 6
-    radial_mem  = [0.0] * 6
-    height_mem  = [dep_neutral] * 6
+    state          = "POWERED_OFF"
+    k              = 0
+    nav_mode       = "OMNI"
+    cam_track      = False
+    smoothed_rpy   = [0.0, 0.0, 0.0]
+    angle_joystick = 0.0
+    last_key       = None
 
-    TRANS_STATES = frozenset((
-        "POWERED_OFF_TO_POWERED_ON_TRANS", "POWERING_OFF",
-        "WORLD_TO_POWERED_OFF_TRANS",      "POWERING_ON_TO_WORLD_TRANS",
-    ))
-
-    KEY_F, KEY_C, KEY_X = ord('f'), ord('c'), ord('x')
-    KEY_Q, KEY_E, KEY_R = ord('q'), ord('e'), ord('r')
-
-    sleep    = time.sleep
-    get_keys = p.getKeyboardEvents
-    step_sim = p.stepSimulation
+    KEY_E = ord('e')
+    KEY_R = ord('r')
+    KEY_F = ord('f')
+    KEY_C = ord('c')
+    KEY_X = ord('x')
+    KEY_B = ord('b')
 
     UP    = p.B3G_UP_ARROW
     DOWN  = p.B3G_DOWN_ARROW
     LEFT  = p.B3G_LEFT_ARROW
     RIGHT = p.B3G_RIGHT_ARROW
-    ARROW_KEYS = (UP, DOWN, LEFT, RIGHT)
 
-    active_input_axis = None
+    for i, cfg in enumerate(LEG_CONFIGS):
+        o, f, t = ik(fk(*ANGLES_STOW_BY_LEG[i]))
+        set_leg(robot, cfg, o, f, t)
 
     while True:
-        keys = get_keys()
+        keys = p.getKeyboardEvents()
 
-        if keys.get(KEY_F, 0) & p.KEY_WAS_TRIGGERED: cam_track = not cam_track
-        if keys.get(KEY_C, 0) & p.KEY_WAS_TRIGGERED: nav_mode  = "TURN"
-        if keys.get(KEY_X, 0) & p.KEY_WAS_TRIGGERED: nav_mode  = "OMNI"
+        if keys.get(KEY_F, 0) & p.KEY_WAS_TRIGGERED:
+            cam_track = not cam_track
+        if keys.get(KEY_C, 0) & p.KEY_WAS_TRIGGERED:
+            nav_mode = "TURN"
+        if keys.get(KEY_X, 0) & p.KEY_WAS_TRIGGERED:
+            nav_mode = "OMNI"
 
         if cam_track:
             pos, _ = p.getBasePositionAndOrientation(robot)
-            p.resetDebugVisualizerCamera(5.0, 270, -25, [pos[0] - 5.0, pos[1], pos[2] + 5.0])
+            p.resetDebugVisualizerCamera(1.0, 270, -25, [pos[0]-1.0, pos[1], pos[2]+1.0])
 
         if last_key and not (last_key in keys and keys[last_key] & p.KEY_IS_DOWN):
             last_key = None
         if not last_key:
-            for k in keys:
-                if keys[k] & p.KEY_IS_DOWN:
-                    last_key = k
+            for kk in keys:
+                if keys[kk] & p.KEY_IS_DOWN:
+                    last_key = kk
                     break
 
-        in_transition = state.endswith("_TRANS") or state.startswith("POWERING")
-        in_fwd = in_lat = 0
+        if last_key == KEY_E and state == "POWERED_OFF":
+            run_boot_sequence(robot, xyz_ini)
+            k     = 0
+            state = "IDLE"
 
-        if not in_transition:
-            if last_key == KEY_Q:
-                if   state == "WORLD":       state, trans_timer, revert_after_shutdown = "WORLD_TO_POWERED_OFF_TRANS", 0.0, False
-                elif state == "POWERED_OFF": state, trans_timer = "POWERING_ON_TO_WORLD_TRANS", 0.0
-                elif state == "POWERED_ON":  state, trans_timer, revert_after_shutdown = "POWERING_OFF", 0.0, True
-            elif last_key == KEY_E:
-                if   state == "WORLD":       state, boot_clock, stand_blend = "POWERING_ON_SEQUENTIAL", 0.0, 0.0
-                elif state == "POWERED_OFF": state, trans_timer = "POWERED_OFF_TO_POWERED_ON_TRANS", 0.0
-            elif last_key == KEY_R:
-                if   state == "POWERED_ON": state, trans_timer, revert_after_shutdown = "POWERING_OFF", 0.0, False
-                elif state == "WORLD":      state, trans_timer = "WORLD_TO_POWERED_OFF_TRANS", 0.0
+        elif last_key == KEY_R and state in ("IDLE", "WALKING", "TURNING", "BALANCE"):
+            run_shutdown_sequence(robot, xyz_ini)
+            state = "POWERED_OFF"
 
-        fwd_pressed = (UP   in keys and keys[UP]   & p.KEY_IS_DOWN) or \
-                      (DOWN in keys and keys[DOWN]  & p.KEY_IS_DOWN)
-        lat_pressed = (LEFT  in keys and keys[LEFT]  & p.KEY_IS_DOWN) or \
-                      (RIGHT in keys and keys[RIGHT] & p.KEY_IS_DOWN)
+        up_dn = (UP   in keys and keys[UP]   & p.KEY_IS_DOWN,
+                 DOWN in keys and keys[DOWN]  & p.KEY_IS_DOWN)
+        lr    = (LEFT  in keys and keys[LEFT]  & p.KEY_IS_DOWN,
+                 RIGHT in keys and keys[RIGHT] & p.KEY_IS_DOWN)
 
-        if fwd_pressed and not lat_pressed:
-            active_input_axis = "fwd"
-        elif lat_pressed and not fwd_pressed:
-            active_input_axis = "lat"
-        elif not fwd_pressed and not lat_pressed:
-            active_input_axis = None
+        moving = any(up_dn) or any(lr)
 
-        dir_keys = [k for k in ARROW_KEYS if k in keys and keys[k] & p.KEY_IS_DOWN]
-
-        if state == "POWERED_ON":
-            for i in range(6):
-                err = (GAIT_PHASES[i] - leg_phases[i] + _PI) % _TWO_PI - _PI
-                leg_phases[i] += err * 0.05
-
-            if dir_keys:
-                gait_acc   += 0.025
-                rest_coeff  = 0.0
-                if active_input_axis == "fwd":
-                    in_fwd = -1 if UP   in dir_keys else 1
-                    in_lat = 0
-                elif active_input_axis == "lat":
-                    in_lat = -1 if RIGHT in dir_keys else 1
-                    in_fwd = 0
+        if state in ("IDLE", "WALKING", "TURNING", "BALANCE"):
+            if last_key == KEY_B:
+                state = "BALANCE"
+            elif moving:
+                if nav_mode == "OMNI":
+                    if   up_dn[0]: angle_joystick = 180.0
+                    elif up_dn[1]: angle_joystick = 0.0
+                    elif lr[0]:    angle_joystick = -90.0
+                    elif lr[1]:    angle_joystick = 90.0
+                    state = "WALKING"
+                else:
+                    if   up_dn[0]: angle_joystick = 180.0
+                    elif up_dn[1]: angle_joystick = 0.0
+                    elif lr[0]:    angle_joystick = -90.0
+                    elif lr[1]:    angle_joystick = 90.0
+                    state = "TURNING"
             else:
-                rest_coeff = min(1.0, rest_coeff + 0.02)
-        else:
-            vel_fwd = vel_lat = gait_acc = 0.0
-            rest_coeff = 1.0
+                if state not in ("IDLE", "POWERED_OFF"):
+                    state = "IDLE"
 
-        vel_fwd += (in_fwd - vel_fwd) * 0.1
-        vel_lat += (in_lat - vel_lat) * 0.1
+        if state == "WALKING":
+            angle_rad = angle_joystick * _RAD
+            results   = compute_andar(k, angle_rad, xyz_ini, bezier)
+            for i, (o, f, t) in enumerate(results):
+                set_leg(robot, LEG_CONFIGS[i], o, f, t)
+            k = (k + 1) % TOTAL_PONTOS
 
-        if state == "POWERING_ON_TO_WORLD_TRANS":
-            trans_timer += 0.01
-            if trans_timer >= 2.0: state = "WORLD"
-        elif state == "WORLD_TO_POWERED_OFF_TRANS":
-            trans_timer += 0.01
-            if trans_timer >= 2.0: state = "POWERED_OFF"
-        elif state == "POWERING_OFF":
-            trans_timer += 0.01
-            if trans_timer >= 4.0:
-                state = "POWERING_ON_TO_WORLD_TRANS" if revert_after_shutdown else "POWERED_OFF"
-                trans_timer = 0.0
-        elif state == "POWERED_OFF_TO_POWERED_ON_TRANS":
-            trans_timer += 0.01
-            if trans_timer >= 4.0: state = "POWERED_ON"
-        elif state == "POWERING_ON_SEQUENTIAL":
-            boot_clock = min(7.0, boot_clock + 0.03)
-            if boot_clock >= 7.0:
-                stand_blend = min(1.0, stand_blend + 0.005)
-                if stand_blend >= 1.0: state = "POWERED_ON"
-
-        is_powered_on  = state == "POWERED_ON"
-        is_powered_off = state == "POWERED_OFF"
-        is_world       = state == "WORLD"
-        is_sequential  = state == "POWERING_ON_SEQUENTIAL"
-        is_trans       = state in TRANS_STATES
-
-        roll = pitch = 0.0
-        if is_powered_on:
-            roll, pitch = get_body_tilt(robot, smoothed_rpy)
-
-        for leg_id, cfg in enumerate(LEG_CONFIGS):
-            coxa_id, femur_id, tibia_id, coxa_home, femur_home, tibia_home, side = cfg
-
-            if is_world:
-                coxa = femur = tibia = 0.0
-
-            elif is_powered_off:
-                coxa, femur, tibia = 0.0, STOWED_FEMUR, STOWED_TIBIA
-
-            elif is_sequential:
-                coxa  = coxa_home * max(0.0, min(1.0, boot_clock))
-                w     = max(0.0, min(1.0, (boot_clock - 1.0) - leg_id))
-                femur = (PEAK_FEMUR * (1.0 - stand_blend) + femur_home * stand_blend) * w
-                tibia = ((PEAK_TIBIA - 20.0) * (1.0 - stand_blend) + tibia_home * stand_blend) * w
-
-            elif is_trans:
-                coxa, femur, tibia = compute_transition_angles(cfg, state, trans_timer)
-
-            elif is_powered_on:
-                phase = gait_acc + leg_phases[leg_id]
-                coxa, femur, tibia = compute_powered_on_angles(
-                    leg_id, cfg, phase, vel_fwd, vel_lat, nav_mode,
-                    rest_coeff, coxa_mem, radial_mem, height_mem,
-                    L1, L2, roll, pitch)
+        elif state == "TURNING":
+            results = compute_andar_circular(k, angle_joystick, xyz_ini, bezier)
+            for i, (o, f, t) in enumerate(results):
+                set_leg(robot, LEG_CONFIGS[i], o, f, t)
+            if abs(angle_joystick) > 90:
+                k = (k - 1) % TOTAL_PONTOS
             else:
-                coxa = femur = tibia = 0.0
+                k = (k + 1) % TOTAL_PONTOS
 
-            set_leg(robot, coxa_id, femur_id, tibia_id, coxa, femur, tibia)
+        elif state == "BALANCE":
+            roll_deg, pitch_deg = get_body_tilt(robot, smoothed_rpy)
+            results = compute_ik_corpo(roll_deg, pitch_deg, 0.0, xyz_ini)
+            for i, (o, f, t) in enumerate(results):
+                set_leg(robot, LEG_CONFIGS[i], o, f, t)
 
-        step_sim()
-        sleep(DT)
+        elif state == "IDLE":
+            for i, cfg in enumerate(LEG_CONFIGS):
+                o, f, t = ik(xyz_ini[i])
+                set_leg(robot, cfg, o, f, t)
 
+        p.stepSimulation()
+        time.sleep(DT)
 
 main()
