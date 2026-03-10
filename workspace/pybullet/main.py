@@ -16,7 +16,7 @@ TOTAL_PONTOS_CIRCULAR = 25
 
 L1 = 2.56
 L2 = 9.00
-L3 = 11.96
+L3 = 12.16
 
 _PI  = math.pi
 _RAD = _PI / 180.0
@@ -177,8 +177,9 @@ def _rotacao_pata(ponto, roll_deg, pitch_deg, yaw_deg):
     return np.array([x, y, z])
 
 def compute_dar_patinha(k, xyz_ini):
-    roll  = -PATINHA_ROLL
-    pitch = -PATINHA_PITCH
+    t         = min(1.0, float(k) / max(1, PATINHA_META - 1))
+    roll      = -PATINHA_ROLL  * t
+    pitch     = -PATINHA_PITCH * t
     sig_right = np.array([-1., -1.,  1.])
     sig_left  = np.array([-1.,  1.,  1.])
     sig_list  = [sig_left, sig_left, sig_left, sig_right, sig_right, sig_right]
@@ -191,7 +192,8 @@ def compute_dar_patinha(k, xyz_ini):
             ombro = SHOULDER_POSITIONS[i]
             ponto = xyz_ini[i] * sig + ombro
             rot   = _rotacao_pata(ponto, roll, pitch, 0.0)
-            xyz   = (rot - ombro) * sig
+            rotated = (rot - ombro) * sig
+            xyz   = np.array([rotated[0], rotated[1], xyz_ini[i][2]])
         results.append(ik(xyz))
     return results
 
@@ -300,53 +302,68 @@ def compute_ik_corpo(roll_deg, pitch_deg, yaw_deg, xyz_ini):
         results.append(ik(xyz))
     return results
 
+def _lerp(a, b, t):
+    return a + (b - a) * t
+
 def run_boot_sequence(robot, xyz_ini):
-    total = 100
-    meta  = total // 2
+    steps = 50
     stow  = [fk(*ANGLES_STOW_BY_LEG[i]) for i in range(6)]
 
-    for k in range(meta):
+    for k in range(steps):
+        t = float(k) / (steps - 1)
         for i, cfg in enumerate(LEG_CONFIGS):
-            dx  = xyz_ini[i][0] - stow[i][0]
-            dy  = xyz_ini[i][1] - stow[i][1]
-            xyz = bezier_pata(stow[i], k, dx, dy, 0, total)
-            o, f, t = ik(xyz)
-            set_leg(robot, cfg, o, f, t)
+            xyz = np.array([
+                _lerp(stow[i][0], xyz_ini[i][0], t),
+                _lerp(stow[i][1], xyz_ini[i][1], t),
+                stow[i][2],
+            ])
+            o, f, s = ik(xyz)
+            set_leg(robot, cfg, o, f, s)
         p.stepSimulation()
         time.sleep(DT * 3)
 
     above = [np.array([xyz_ini[i][0], xyz_ini[i][1], stow[i][2]]) for i in range(6)]
-    for k in range(meta):
+    for k in range(steps):
+        t = float(k) / (steps - 1)
         for i, cfg in enumerate(LEG_CONFIGS):
-            dz  = xyz_ini[i][2] - above[i][2]
-            xyz = bezier_pata(above[i], k, 0, 0, dz, total)
-            o, f, t = ik(xyz)
-            set_leg(robot, cfg, o, f, t)
+            xyz = np.array([
+                xyz_ini[i][0],
+                xyz_ini[i][1],
+                _lerp(above[i][2], xyz_ini[i][2], t),
+            ])
+            o, f, s = ik(xyz)
+            set_leg(robot, cfg, o, f, s)
         p.stepSimulation()
         time.sleep(DT * 3)
 
 def run_shutdown_sequence(robot, xyz_ini):
-    total = 100
-    meta  = total // 2
+    steps = 50
     stow  = [fk(*ANGLES_STOW_BY_LEG[i]) for i in range(6)]
     above = [np.array([xyz_ini[i][0], xyz_ini[i][1], stow[i][2]]) for i in range(6)]
 
-    for k in range(meta):
+    for k in range(steps):
+        t = float(k) / (steps - 1)
         for i, cfg in enumerate(LEG_CONFIGS):
-            dz  = above[i][2] - xyz_ini[i][2]
-            xyz = bezier_pata(xyz_ini[i], k, 0, 0, dz, total)
-            o, f, t = ik(xyz)
-            set_leg(robot, cfg, o, f, t)
+            xyz = np.array([
+                xyz_ini[i][0],
+                xyz_ini[i][1],
+                _lerp(xyz_ini[i][2], above[i][2], t),
+            ])
+            o, f, s = ik(xyz)
+            set_leg(robot, cfg, o, f, s)
         p.stepSimulation()
         time.sleep(DT * 3)
 
-    for k in range(meta):
+    for k in range(steps):
+        t = float(k) / (steps - 1)
         for i, cfg in enumerate(LEG_CONFIGS):
-            dx  = stow[i][0] - xyz_ini[i][0]
-            dy  = stow[i][1] - xyz_ini[i][1]
-            xyz = bezier_pata(above[i], k, dx, dy, 0, total)
-            o, f, t = ik(xyz)
-            set_leg(robot, cfg, o, f, t)
+            xyz = np.array([
+                _lerp(xyz_ini[i][0], stow[i][0], t),
+                _lerp(xyz_ini[i][1], stow[i][1], t),
+                above[i][2],
+            ])
+            o, f, s = ik(xyz)
+            set_leg(robot, cfg, o, f, s)
         p.stepSimulation()
         time.sleep(DT * 3)
 
@@ -356,6 +373,7 @@ def main():
     xyz_ini, bezier = init_leg_state()
 
     state          = "POWERED_OFF"
+    prev_state     = None
     k              = 0
     sim_tick       = 0
     nav_mode       = "OMNI"
@@ -398,6 +416,12 @@ def main():
             nav_mode = "TURN"
         if keys.get(KEY_X, 0) & p.KEY_WAS_TRIGGERED:
             nav_mode = "OMNI"
+        if keys.get(KEY_P, 0) & p.KEY_WAS_TRIGGERED:
+            if state == "PATINHA":
+                state = "IDLE"
+            elif state in ("IDLE", "WALKING", "TURNING", "BALANCE", "REBOLAR", "POSE"):
+                patinha_k = 0
+                state = "PATINHA"
 
         if cam_track:
             pos, _ = p.getBasePositionAndOrientation(robot)
@@ -434,9 +458,12 @@ def main():
                 state = "REBOLAR"
             elif last_key == KEY_N:
                 state = "BALANCE"
-            elif (last_key == KEY_G or last_key == KEY_P) and state != "PATINHA":
-                patinha_k = 0
-                state = "PATINHA"
+            elif last_key == KEY_G:
+                if state == "PATINHA":
+                    state = "IDLE"
+                else:
+                    patinha_k = 0
+                    state = "PATINHA"
             elif z_held:
                 state = "POSE"
                 if up_dn[0]:
@@ -503,8 +530,6 @@ def main():
                 set_leg(robot, LEG_CONFIGS[i], o, f, t)
             if patinha_k < PATINHA_META - 1:
                 patinha_k += 1
-            else:
-                state = "IDLE"
 
         elif state == "REBOLAR":
             results = compute_rebolar(k, xyz_ini)
@@ -514,9 +539,12 @@ def main():
                 k = (k + 1) % TOTAL_PONTOS_CIRCULAR
 
         elif state == "IDLE":
-            for i, cfg in enumerate(LEG_CONFIGS):
-                o, f, t = ik(xyz_ini[i])
-                set_leg(robot, cfg, o, f, t)
+            if prev_state != "IDLE":
+                for i, cfg in enumerate(LEG_CONFIGS):
+                    o, f, t = ik(xyz_ini[i])
+                    set_leg(robot, cfg, o, f, t)
+
+        prev_state = state
 
         p.stepSimulation()
         time.sleep(DT)
