@@ -48,8 +48,7 @@ source keys
 onshape-to-robot pybullet (path of the folder with the config.json)
 ```
 # (In Development)
-Refining the kinematics inside pybullet before going through ros and gazebo implementation.
-
+Gazebosim implementation and setup
 ## Setting things up
 ### Cloning the Repository
 ```bash
