@@ -12,6 +12,8 @@ from std_msgs.msg import String
 POSE_STEP = 1.5
 POSE_MAX  = 15.0
 
+MOVE_KEYS = {'w', 's', 'a', 'd', '\x1b[A', '\x1b[B', '\x1b[C', '\x1b[D'}
+
 class TeleopHexapod(Node):
     def __init__(self):
         super().__init__('teleop_hexapod')
@@ -39,7 +41,6 @@ class TeleopHexapod(Node):
         rlist, _, _ = select.select([sys.stdin], [], [], 0.02)
         if rlist:
             key = sys.stdin.read(1)
-
             if key == '\x1b':
                 extra = sys.stdin.read(2)
                 key = key + extra
@@ -63,6 +64,13 @@ class TeleopHexapod(Node):
         msg.angular.z = az
         self.vel_pub.publish(msg)
 
+    def _republish_vel(self):
+        msg = Twist()
+        msg.linear.x  = self.current_lx
+        msg.linear.y  = self.current_ly
+        msg.angular.z = self.current_az
+        self.vel_pub.publish(msg)
+
     def _stop(self):
         self._pub_vel()
         self._pub_state('IDLE')
@@ -74,7 +82,7 @@ class TeleopHexapod(Node):
                 key = self._get_key(settings)
 
                 if not key:
-                    self._pub_vel()
+                    self._republish_vel()
                     continue
 
                 if key == 'e':
