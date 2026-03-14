@@ -70,7 +70,8 @@ source setup.bash
 ### Terminal 1 — Simulation
 
 ```bash
-source ~/tiffany_gazebo/setup.bash
+cd ~/tiffany_gazebo
+source setup.bash
 ros2 launch hexapod_ws main.launch.py
 ```
 
@@ -79,6 +80,7 @@ Controllers load automatically via timed actions (~15 s). Wait for the `hexapod_
 ### Terminal 2 — Teleop
 
 ```bash
+cd ~/tiffany_gazebo
 source setup.bash
 ros2 run hexapod_ws teleop_hexapod.py
 ```
