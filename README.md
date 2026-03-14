@@ -64,6 +64,23 @@ cd ~/tiffany_gazebo
 source setup.bash
 ros2 run hexapod_ws teleop_hexapod.py
 ```
+### Terminal 3 — Camera Feed
+```bash
+source /opt/ros/jazzy/setup.bash
+ros2 run rqt_image_view rqt_image_view
+```
+Select `/camera/image_raw` from the dropdown.
+### Terminal 4 — Lidar in RViz
+```bash
+source /opt/ros/jazzy/setup.bash
+ros2 run rviz2 rviz2 --ros-args -p use_sim_time:=true
+```
+In RViz:
+1. Set **Fixed Frame** to `lidar_frame`
+2. Click **Add → By topic → `/scan` → LaserScan**
+3. Click **Add → TF** to visualize joint frames
+---
+## Controls
 | Key | Action |
 |-----|--------|
 | `E` | Boot robot |
@@ -78,20 +95,3 @@ ros2 run hexapod_ws teleop_hexapod.py
 | `C` | Turn navigation mode |
 | `X` | Omni navigation mode |
 | `SPACE` | Stop |
----
-## Sensor Visualization
-### Camera Feed
-```bash
-source /opt/ros/jazzy/setup.bash
-ros2 run rqt_image_view rqt_image_view
-```
-Select `/camera/image_raw` from the dropdown.
-### Lidar in RViz
-```bash
-source /opt/ros/jazzy/setup.bash
-ros2 run rviz2 rviz2 --ros-args -p use_sim_time:=true
-```
-In RViz:
-1. Set **Fixed Frame** to `lidar_frame`
-2. Click **Add → By topic → `/scan` → LaserScan**
-3. Click **Add → TF** to visualize joint frames
